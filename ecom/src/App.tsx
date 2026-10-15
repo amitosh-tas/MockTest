@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { formatPrice, products, type Product } from '../../shared/catalog'
-import { identifyVisitor } from './touch-tracking'
+import { identifyVisitor, recordProductTouch } from './touch-tracking'
 import './App.css'
 
 type CartLine = { productId: string; quantity: number }
@@ -87,6 +87,12 @@ function App() {
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
+
+  useEffect(() => {
+    if (route.page === 'product') {
+      void recordProductTouch()
+    }
+  }, [route])
 
   useEffect(() => {
     try {

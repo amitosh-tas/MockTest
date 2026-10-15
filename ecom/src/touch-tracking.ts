@@ -174,11 +174,18 @@ function shouldSendTouch(payload: TouchPayload, history: StoredTouch[]): boolean
   const previous = history.at(-1)
   if (!previous || Date.now() - previous.recordedAt > SESSION_WINDOW_MS) return true
 
+  const previousWasAttributed = hasMarketingSignal(previous.payload)
+  const currentIsAttributed = hasMarketingSignal(payload)
+
+  // A navigation without campaign parameters must not overwrite a recent ad touch as organic.
+  if (previousWasAttributed && !currentIsAttributed) return false
+
+  if (!currentIsAttributed) return false
+
   return (
     previous.payload.source !== payload.source ||
     previous.payload.campaign !== payload.campaign ||
-    (getTouchSignature(previous.payload) !== getTouchSignature(payload) &&
-      hasMarketingSignal(payload))
+    getTouchSignature(previous.payload) !== getTouchSignature(payload)
   )
 }
 
@@ -276,7 +283,9 @@ function saveSuccessfulTouch(touch: StoredTouch): void {
   }
 }
 
-async function captureLandingTouch(): Promise<void> {
+export async function recordProductTouch(): Promise<void> {
+  if (!/^\/product\/[^/]+\/?$/.test(window.location.pathname)) return
+
   if (!API_KEY) {
     console.error(
       'Touch tracking is not configured: set VITE_ATTRIBUTION_API_KEY in ecom/.env and restart the Vite dev server.',
@@ -332,5 +341,3 @@ async function captureLandingTouch(): Promise<void> {
   saveSuccessfulTouch({ payload, response: result, recordedAt: Date.now() })
   console.info('Attribution touch recorded:', result)
 }
-
-void captureLandingTouch()
