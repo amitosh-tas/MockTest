@@ -220,6 +220,8 @@ export async function identifyVisitor(email: string): Promise<boolean> {
     return false
   }
 
+  console.log("In Identify")
+
   const payload = { visitorId: getVisitorId(), email }
   let response: Response
   try {
