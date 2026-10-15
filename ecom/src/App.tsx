@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState } from 'react'
 import { formatPrice, products, type Product } from '../../shared/catalog'
 import { identifyVisitor } from './touch-tracking'
 import './App.css'
