@@ -1,6 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { formatPrice, products, type Product } from '../../shared/catalog'
 import { createCheckoutSession, identifyVisitor, recordProductTouch } from './touch-tracking'
+import {
+  createRazorpayOrder,
+  loadRazorpayCheckout,
+  openRazorpayCheckout,
+  verifyRazorpayPayment,
+  type RazorpayPaymentResponse,
+} from './razorpay'
 import './App.css'
 
 type CartLine = { productId: string; quantity: number }
@@ -84,8 +91,12 @@ function App() {
   const [checkoutStep, setCheckoutStep] = useState<'details' | 'payment'>('details')
   const [checkoutEmail, setCheckoutEmail] = useState('')
   const [checkoutEmailIdentified, setCheckoutEmailIdentified] = useState(false)
-  const [paymentSucceeded, setPaymentSucceeded] = useState(false)
+  const [paymentVerified, setPaymentVerified] = useState(false)
+  const [gatewayOpen, setGatewayOpen] = useState(false)
+  const [pendingPayment, setPendingPayment] = useState<RazorpayPaymentResponse | null>(null)
   const [checkoutError, setCheckoutError] = useState('')
+  const finalizingPayment = useRef(false)
+  const startingPayment = useRef(false)
 
   useEffect(() => {
     const onPopState = () => setRoute(getRoute())
@@ -144,7 +155,7 @@ function App() {
   const subtotal = cartProducts.reduce((total, line) => total + line.product.price * line.quantity, 0)
   const product = products.find((item) => item.slug === route.slug)
 
-  async function handlePlaceTestOrder(event: React.SubmitEvent<HTMLFormElement>) {
+  async function handleContinueToPayment(event: React.SubmitEvent<HTMLFormElement>) {
     event.preventDefault()
     if (submitting || cartProducts.length === 0) return
     const form = event.currentTarget
@@ -156,7 +167,9 @@ function App() {
       const emailIdentified = await identifyVisitor(email)
       setCheckoutEmail(email)
       setCheckoutEmailIdentified(emailIdentified)
-      setPaymentSucceeded(false)
+      setPaymentVerified(false)
+      setGatewayOpen(false)
+      setPendingPayment(null)
       setCheckoutError('')
       setCheckoutStep('payment')
     } finally {
@@ -164,19 +177,19 @@ function App() {
     }
   }
 
-  async function handleMockPayment(event: React.SubmitEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (submitting || cartProducts.length === 0) return
-    const form = event.currentTarget
-    if (!form.reportValidity()) return
-
+  async function finishPayment(response: RazorpayPaymentResponse) {
+    if (finalizingPayment.current) return
+    finalizingPayment.current = true
     setSubmitting(true)
     setCheckoutError('')
     try {
-      setPaymentSucceeded(true)
+      if (!paymentVerified) {
+        await verifyRazorpayPayment(response)
+        setPaymentVerified(true)
+      }
       await createCheckoutSession()
       const completedOrder = {
-        id: `NS-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+        id: response.razorpay_order_id,
         email: checkoutEmail,
         items: cart,
         emailIdentified: checkoutEmailIdentified,
@@ -185,16 +198,64 @@ function App() {
       setCart([])
       navigate('/order-confirmation')
     } catch (error) {
-      console.error('The payment was simulated, but the checkout session could not be created.', error)
-      setCheckoutError(error instanceof Error ? error.message : 'The checkout session could not be created.')
+      console.error('Razorpay payment confirmation or checkout-session creation failed.', error)
+      setCheckoutError(error instanceof Error ? error.message : 'Payment confirmation could not be completed.')
     } finally {
+      finalizingPayment.current = false
+      setSubmitting(false)
+    }
+  }
+
+  async function handleStartPayment() {
+    if (submitting || startingPayment.current || cartProducts.length === 0) return
+
+    startingPayment.current = true
+    setSubmitting(true)
+    setCheckoutError('')
+    try {
+      const items = cart.map(({ productId, quantity }) => ({ productId, quantity }))
+      const [order] = await Promise.all([
+        createRazorpayOrder(items, subtotal * 100),
+        loadRazorpayCheckout(),
+      ])
+      let paymentCompleted = false
+      openRazorpayCheckout(
+        order,
+        checkoutEmail,
+        (response) => {
+          paymentCompleted = true
+          setGatewayOpen(false)
+          setPendingPayment(response)
+          setPaymentVerified(false)
+          void finishPayment(response)
+        },
+        (message) => {
+          setGatewayOpen(false)
+          setCheckoutError(message)
+          setSubmitting(false)
+        },
+        () => {
+          if (paymentCompleted) return
+          setGatewayOpen(false)
+          setCheckoutError('Payment window closed. You can reopen Razorpay checkout to try again.')
+          setSubmitting(false)
+        },
+      )
+      setGatewayOpen(true)
+      startingPayment.current = false
+      setSubmitting(false)
+    } catch (error) {
+      startingPayment.current = false
+      setGatewayOpen(false)
+      console.error('Could not start Razorpay checkout.', error)
+      setCheckoutError(error instanceof Error ? error.message : 'Could not start Razorpay checkout.')
       setSubmitting(false)
     }
   }
 
   return (
     <div className="store-app">
-      <div className="announcement">A little something extra: complimentary shipping over $100</div>
+      <div className="announcement">Secure checkout powered by Razorpay</div>
       <Header cartCount={cartCount} />
       <main>
         {notice && <div className="store-notice" role="status">{notice}</div>}
@@ -237,39 +298,35 @@ function App() {
               <div className="cart-layout"><div className="cart-lines">{cartProducts.map(({ product: item, quantity }) => <article className="cart-line" key={item.id}>
                 <a href={`/product/${item.slug}`}><img src={item.image} alt={item.name} /></a><div className="cart-line-main"><a href={`/product/${item.slug}`}><h2>{item.name}</h2></a><span>{formatPrice(item.price)}</span><div className="quantity-controls" aria-label={`Quantity for ${item.name}`}><button type="button" aria-label={`Decrease ${item.name} quantity`} onClick={() => updateQuantity(item.id, quantity - 1)}>−</button><span>{quantity}</span><button type="button" aria-label={`Increase ${item.name} quantity`} onClick={() => updateQuantity(item.id, quantity + 1)}>+</button></div><button className="remove-link" type="button" onClick={() => updateQuantity(item.id, 0)}>Remove</button></div>
                 <strong>{formatPrice(item.price * quantity)}</strong>
-              </article>)}</div><aside className="summary-box"><h2>Order summary</h2><div className="summary-row"><span>Subtotal</span><span>{formatPrice(subtotal)}</span></div><div className="summary-row"><span>Shipping</span><span>{subtotal >= 100 ? 'Complimentary' : 'Calculated at checkout'}</span></div><div className="summary-row summary-total"><span>Estimated total</span><strong>{formatPrice(subtotal)}</strong></div><button className="button button-dark full-button" type="button" onClick={() => navigate('/checkout')}>Continue to checkout <span>↗</span></button><p className="test-note">Test checkout only — no real payment or fulfillment.</p></aside></div>}
+              </article>)}</div><aside className="summary-box"><h2>Order summary</h2><div className="summary-row"><span>Subtotal</span><span>{formatPrice(subtotal)}</span></div><div className="summary-row"><span>Shipping</span><span>Not charged</span></div><div className="summary-row summary-total"><span>Total</span><strong>{formatPrice(subtotal)}</strong></div><button className="button button-dark full-button" type="button" onClick={() => navigate('/checkout')}>Continue to checkout <span>↗</span></button><p className="test-note">Payments via Razorpay · No fulfillment integration.</p></aside></div>}
           </section>
         )}
         {route.page === 'checkout' && (
           <section className="section-wrap page-section">
-            <span className="eyebrow">A TEST CHECKOUT</span><h1 className="page-title">Almost yours.</h1>
+            <span className="eyebrow">SECURE CHECKOUT</span><h1 className="page-title">Almost yours.</h1>
             {cartProducts.length === 0 ? <div className="empty-state"><p>Your bag is empty, so there’s nothing to check out just yet.</p><a className="button button-dark" href="/#shop">Browse the collection</a></div> :
               <div className="checkout-layout">
-                {checkoutStep === 'details' ? <form className="checkout-form" onSubmit={handlePlaceTestOrder}>
-                  <div className="test-banner"><strong>Just a test, promise.</strong><span>No payment is collected and no order will be fulfilled.</span></div>
+                {checkoutStep === 'details' ? <form className="checkout-form" onSubmit={handleContinueToPayment}>
+                  <div className="test-banner"><strong>Payment securely processed by Razorpay</strong><span>Your payment details are entered only in Razorpay Checkout.</span></div>
                   <h2>Contact</h2><label htmlFor="email">Email address</label><input id="email" name="email" type="email" autoComplete="email" placeholder="you@example.com" required />
-                  <h2>Shipping address</h2><div className="form-row"><div><label htmlFor="firstName">First name</label><input id="firstName" name="firstName" autoComplete="given-name" required /></div><div><label htmlFor="lastName">Last name</label><input id="lastName" name="lastName" autoComplete="family-name" required /></div></div>
-                  <label htmlFor="address">Address</label><input id="address" name="address" autoComplete="street-address" required />
-                  <div className="form-row"><div><label htmlFor="city">City</label><input id="city" name="city" autoComplete="address-level2" required /></div><div><label htmlFor="postal">ZIP code</label><input id="postal" name="postal" autoComplete="postal-code" required /></div></div>
                   <button className="button button-dark full-button" type="submit" disabled={submitting}>{submitting ? 'Saving details…' : 'Continue to payment'} <span>↗</span></button>
-                </form> : <form className="checkout-form gateway-form" onSubmit={handleMockPayment}>
-                  <div className="gateway-heading"><span className="eyebrow">NORTHSTAR MOCK GATEWAY</span><strong>Secure test payment</strong></div>
-                  <div className="test-banner"><strong>Simulated payment only</strong><span>These test details are not saved or sent to a payment provider.</span></div>
-                  <label htmlFor="cardName">Name on card</label><input id="cardName" name="cardName" autoComplete="cc-name" placeholder="Alex Morgan" required />
-                  <label htmlFor="cardNumber">Card number</label><input id="cardNumber" name="cardNumber" inputMode="numeric" autoComplete="cc-number" placeholder="4242 4242 4242 4242" pattern="[0-9 ]{12,23}" required />
-                  <div className="form-row"><div><label htmlFor="cardExpiry">Expiry date</label><input id="cardExpiry" name="cardExpiry" autoComplete="cc-exp" placeholder="MM / YY" pattern="(0[1-9]|1[0-2])\s*/\s*[0-9]{2}" required /></div><div><label htmlFor="cardCvc">Security code</label><input id="cardCvc" name="cardCvc" inputMode="numeric" autoComplete="cc-csc" placeholder="CVC" pattern="[0-9]{3,4}" required /></div></div>
+                </form> : <div className="checkout-form gateway-form">
+                  <div className="gateway-heading"><span className="eyebrow">RAZORPAY CHECKOUT</span><strong>Secure payment</strong></div>
+                  <div className="test-banner"><strong>Payment details stay with Razorpay</strong><span>You’ll complete payment in Razorpay’s secure checkout window.</span></div>
                   <div className="gateway-total"><span>Amount due</span><strong>{formatPrice(subtotal)}</strong></div>
-                  {paymentSucceeded && <p className="payment-status" role="status">Mock payment succeeded. Confirming your checkout with Northstar…</p>}
-                  {checkoutError && <p className="checkout-error" role="alert">Payment was simulated, but order confirmation is waiting for the checkout service: {checkoutError}</p>}
-                  <button className="button button-dark full-button" type="submit" disabled={submitting}>{submitting ? 'Confirming checkout…' : paymentSucceeded ? 'Retry order confirmation' : `Pay ${formatPrice(subtotal)}`} <span>↗</span></button>
-                  <button className="button button-outline full-button" type="button" onClick={() => { setCheckoutStep('details'); setCheckoutError('') }} disabled={submitting || paymentSucceeded}>Back to shipping details</button>
-                </form>}
+                  {gatewayOpen && <p className="payment-status" role="status">Razorpay Checkout is open. Complete payment or close its window to continue.</p>}
+                  {paymentVerified && <p className="payment-status" role="status">Payment verified. Confirming your checkout with Northstar…</p>}
+                  {checkoutError && <p className="checkout-error" role="alert">{checkoutError}</p>}
+                  {pendingPayment ? <button className="button button-dark full-button" type="button" onClick={() => void finishPayment(pendingPayment)} disabled={submitting}>{submitting ? 'Confirming checkout…' : paymentVerified ? 'Retry order confirmation' : 'Retry payment verification'} <span>↗</span></button> :
+                    <button className="button button-dark full-button" type="button" onClick={() => void handleStartPayment()} disabled={submitting || gatewayOpen}>{submitting ? 'Preparing secure checkout…' : gatewayOpen ? 'Complete payment in Razorpay…' : `Continue to Razorpay · ${formatPrice(subtotal)}`} <span>↗</span></button>}
+                  <button className="button button-outline full-button" type="button" onClick={() => { setCheckoutStep('details'); setCheckoutError('') }} disabled={submitting || gatewayOpen || pendingPayment !== null}>Back to shipping details</button>
+                </div>}
                 <aside className="summary-box checkout-summary"><h2>Order summary</h2>{cartProducts.map(({ product: item, quantity }) => <div className="checkout-item" key={item.id}><img src={item.image} alt="" /><span>{item.name} × {quantity}</span><strong>{formatPrice(item.price * quantity)}</strong></div>)}<div className="summary-row summary-total"><span>Total</span><strong>{formatPrice(subtotal)}</strong></div></aside>
               </div>}
           </section>
         )}
         {route.page === 'confirmation' && (
-          order ? <section className="confirmation"><span className="confirmation-mark">✓</span><span className="eyebrow">TEST ORDER COMPLETE</span><h1>That’s a wrap.</h1><p>Your simulated order is confirmed. Nothing has been charged or shipped.</p><p className={`identify-result ${order.emailIdentified ? 'identify-success' : 'identify-failure'}`} role="status">{order.emailIdentified ? 'Email linked to this visitor in the Attribution System.' : 'Order confirmed, but email identification could not be confirmed.'}</p><div className="confirmation-card"><span>Mock order number</span><strong>{order.id}</strong><span>Confirmation sent to (for this session only)</span><strong>{order.email}</strong><span>Items in this test order</span><strong>{order.items.reduce((total, item) => total + item.quantity, 0)}</strong></div><a className="button button-dark" href="/">Back to Northstar <span>↗</span></a></section> : <section className="empty-state"><h1>No order to show yet.</h1><a className="button button-dark" href="/">Back to the store</a></section>
+          order ? <section className="confirmation"><span className="confirmation-mark">✓</span><span className="eyebrow">ORDER COMPLETE</span><h1>That’s a wrap.</h1><p>Your Razorpay payment and checkout are confirmed.</p><p className={`identify-result ${order.emailIdentified ? 'identify-success' : 'identify-failure'}`} role="status">{order.emailIdentified ? 'Email linked to this visitor in the Attribution System.' : 'Order confirmed, but email identification could not be confirmed.'}</p><div className="confirmation-card"><span>Order number</span><strong>{order.id}</strong><span>Confirmation sent to</span><strong>{order.email}</strong><span>Items in this order</span><strong>{order.items.reduce((total, item) => total + item.quantity, 0)}</strong></div><a className="button button-dark" href="/">Back to Northstar <span>↗</span></a></section> : <section className="empty-state"><h1>No order to show yet.</h1><a className="button button-dark" href="/">Back to the store</a></section>
         )}
       </main>
       <footer className="store-footer"><a className="store-brand" href="/"><span className="brand-mark">N</span><span>northstar<span className="brand-light"> supply</span></span></a><span>Thoughtful things for everyday life.</span><span>© 2026 Northstar Supply · Test storefront</span></footer>

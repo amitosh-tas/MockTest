@@ -7,11 +7,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node --env-file=.env backend/server.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
-    "crypto": "^1.0.1",
     "express": "^5.3.0",
     "razorpay": "^2.9.8",
     "react": "^19.2.8",

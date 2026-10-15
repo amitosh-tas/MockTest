@@ -1,102 +1,150 @@
-// server.js
-const express = require('express');
-const Razorpay = require('razorpay');
-const crypto = require('crypto');
-const cors = require('cors');
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createRequire } from 'node:module'
+import cors from 'cors'
+import express from 'express'
+import Razorpay from 'razorpay'
 
-const app = express();
+const app = express()
+const require = createRequire(import.meta.url)
+const port = Number(process.env.PORT || 3001)
+const storefrontOrigin = process.env.STOREFRONT_ORIGIN || 'http://localhost:5173'
+const currency = 'INR'
+const productPrices = new Map(Object.entries(require('../../shared/catalog-prices.json')))
 
-// Middleware to parse JSON and form data, and handle CORS
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cors());
+app.use(cors({ origin: storefrontOrigin }))
+app.use(express.json({ limit: '16kb' }))
 
-// Initialize Razorpay instance with your Test Keys
-// In production, ALWAYS store these in environment variables (process.env.RAZORPAY_KEY_ID)
-const razorpay = new Razorpay({
-    key_id: 'rzp_test_YOUR_KEY_ID',
-    key_secret: 'YOUR_KEY_SECRET'
-});
+function getRazorpayCredentials() {
+  const keyId = process.env.RAZORPAY_KEY_ID
+  const keySecret = process.env.RAZORPAY_KEY_SECRET
+  if (!keyId || !keySecret) {
+    throw new Error('Configure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET on the payment server.')
+  }
+  return { keyId, keySecret }
+}
 
-/**
- * ROUTE 1: Create an Order
- * This route is triggered when a customer clicks "Checkout" on your frontend.
- * It communicates with Razorpay to register an intent to pay.
- */
-app.post('/create-order', async (req, res) => {
-    try {
-        const { amount, currency } = req.body;
+function getRazorpay() {
+  const { keyId, keySecret } = getRazorpayCredentials()
+  return new Razorpay({ key_id: keyId, key_secret: keySecret })
+}
 
-        if (!amount) {
-            return res.status(400).json({ error: "Amount is required" });
-        }
+function calculateAmount(items) {
+  if (!Array.isArray(items) || items.length === 0 || items.length > productPrices.size) {
+    throw new Error('Provide a valid list of cart items.')
+  }
 
-        // Razorpay expects amount in paise (1 INR = 100 paise)
-        // e.g., if amount is ₹500, pass 50000
-        const options = {
-            amount: Number(amount) * 100,
-            currency: currency || "INR",
-            receipt: `receipt_order_${Date.now()}`
-        };
-
-        const order = await razorpay.orders.create(options);
-
-        // Send the order object back to the frontend
-        res.status(200).json({
-            success: true,
-            order_id: order.id,
-            amount: order.amount,
-            currency: order.currency
-        });
-
-    } catch (error) {
-        console.error("Error creating Razorpay order:", error);
-        res.status(500).json({ success: false, error: error.message });
+  const seen = new Set()
+  let total = 0
+  for (const item of items) {
+    if (
+      !item ||
+      typeof item.productId !== 'string' ||
+      !Number.isSafeInteger(item.quantity) ||
+      item.quantity < 1 ||
+      item.quantity > 99 ||
+      seen.has(item.productId)
+    ) {
+      throw new Error('Cart item data is invalid.')
     }
-});
+    const price = productPrices.get(item.productId)
+    if (price === undefined) throw new Error('Cart contains an unknown product.')
+    seen.add(item.productId)
+    total += price * item.quantity
+  }
 
-/**
- * ROUTE 2: Verify Payment Signature
- * This route is triggered AFTER the user enters card details and authorizes payment.
- * Razorpay frontend returns critical tokens which MUST be verified server-side.
- */
-app.post('/verify-payment', (req, res) => {
-    try {
-        const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+  const amount = total * 100
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    throw new Error('The checkout amount is invalid.')
+  }
+  return amount
+}
 
-        if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-            return res.status(400).json({ success: false, error: "Missing verification parameters" });
-        }
+app.post('/api/create-order', async (req, res) => {
+  let amount
+  try {
+    amount = calculateAmount(req.body?.items)
+    const { keyId } = getRazorpayCredentials()
+    const razorpay = getRazorpay()
+    const order = await razorpay.orders.create({
+      amount,
+      currency,
+      receipt: `ns_${randomUUID().replaceAll('-', '').slice(0, 32)}`,
+    })
 
-        // Step 1: Create the signature payload by concatenating order_id and payment_id with a pipe (|)
-        const payload = razorpay_order_id + "|" + razorpay_payment_id;
+    res.status(201).json({
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      notes: {
+        sessionToken: "session tokken - add ",
+      },
+      keyId,
+    })
+  } catch (error) {
+    const isInputError = error instanceof Error &&
+      (error.message.startsWith('Provide ') ||
+        error.message.startsWith('Cart ') ||
+        error.message.startsWith('The checkout amount'))
+    const isConfigurationError = error instanceof Error && error.message.startsWith('Configure ')
+    const status = isInputError ? 400 : isConfigurationError ? 503 : 502
+    console.error('Could not create a Razorpay order:', error)
+    res.status(status).json({ message: error instanceof Error ? error.message : 'Could not create payment order.' })
+  }
+})
 
-        // Step 2: Generate an HMAC hex digest using SHA256 and your Key Secret
-        const expectedSignature = crypto
-            .createHmac('sha256', razorpay.key_secret)
-            .update(payload.toString())
-            .digest('hex');
+app.post('/api/verify-payment', async (req, res) => {
+  const {
+    razorpay_order_id: orderId,
+    razorpay_payment_id: paymentId,
+    razorpay_signature: signature,
+  } = req.body || {}
 
-        // Step 3: Compare your generated signature against the signature returned by Razorpay
-        if (expectedSignature === razorpay_signature) {
-            console.log(`Payment successful for Order ID: ${razorpay_order_id}`);
+  if (
+    typeof orderId !== 'string' ||
+    typeof paymentId !== 'string' ||
+    typeof signature !== 'string' ||
+    !/^[a-f\d]{64}$/i.test(signature)
+  ) {
+    return res.status(400).json({ message: 'Payment verification data is invalid.' })
+  }
 
-            // TODO: Update your database here (e.g., set order status to 'PAID', reduce inventory)
-
-            res.status(200).json({ success: true, message: "Payment verified successfully" });
-        } else {
-            console.warn(`Signature mismatch for Order ID: ${razorpay_order_id}`);
-            res.status(400).json({ success: false, error: "Payment verification failed / Signature mismatch" });
-        }
-
-    } catch (error) {
-        console.error("Error verifying signature:", error);
-        res.status(500).json({ success: false, error: error.message });
+  try {
+    const { keySecret } = getRazorpayCredentials()
+    const expectedSignature = createHmac('sha256', keySecret)
+      .update(`${orderId}|${paymentId}`)
+      .digest()
+    const receivedSignature = Buffer.from(signature, 'hex')
+    if (
+      expectedSignature.length !== receivedSignature.length ||
+      !timingSafeEqual(expectedSignature, receivedSignature)
+    ) {
+      return res.status(400).json({ message: 'Razorpay payment signature verification failed.' })
     }
-});
 
-// Start Server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-});
+    const razorpay = getRazorpay()
+    const [order, payment] = await Promise.all([
+      razorpay.orders.fetch(orderId),
+      razorpay.payments.fetch(paymentId),
+    ])
+    if (
+      payment.order_id !== order.id ||
+      payment.amount !== order.amount ||
+      payment.currency !== currency ||
+      order.currency !== currency ||
+      payment.status !== 'captured'
+    ) {
+      return res.status(400).json({ message: 'The Razorpay payment is not captured for this order.' })
+    }
+
+    return res.status(200).json({ verified: true })
+  } catch (error) {
+    console.error('Could not verify Razorpay payment:', error)
+    return res.status(502).json({
+      message: error instanceof Error ? error.message : 'Could not verify Razorpay payment.',
+    })
+  }
+})
+
+app.listen(port, () => {
+  console.info(`Razorpay payment server listening on http://localhost:${port}`)
+})
