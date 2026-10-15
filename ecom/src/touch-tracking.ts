@@ -214,6 +214,55 @@ async function getErrorMessage(response: Response): Promise<string> {
   return `Touch request failed with HTTP ${response.status}.`
 }
 
+export async function identifyVisitor(email: string): Promise<boolean> {
+  if (!API_KEY) {
+    console.error('Visitor identification was not sent: configure VITE_ATTRIBUTION_API_KEY.')
+    return false
+  }
+
+  const payload = { visitorId: getVisitorId(), email }
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}/v1/identify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': API_KEY,
+      },
+      body: JSON.stringify(payload),
+    })
+  } catch (error) {
+    console.error('Could not reach the Attribution System identify endpoint.', error)
+    return false
+  }
+
+  if (response.status !== 200) {
+    console.error(await getErrorMessage(response))
+    return false
+  }
+
+  try {
+    const result: unknown = await response.json()
+    if (
+      typeof result !== 'object' ||
+      result === null ||
+      !('customerId' in result) ||
+      typeof result.customerId !== 'string' ||
+      !('isNew' in result) ||
+      typeof result.isNew !== 'boolean'
+    ) {
+      console.error('The identify endpoint returned an unexpected response format.', result)
+      return false
+    }
+
+    console.info('Attribution visitor identified:', result)
+    return true
+  } catch (error) {
+    console.error('The identify endpoint returned an unreadable JSON response.', error)
+    return false
+  }
+}
+
 function saveSuccessfulTouch(touch: StoredTouch): void {
   const history = readTouchHistory()
   history.push(touch)

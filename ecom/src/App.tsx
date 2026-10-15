@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { formatPrice, products, type Product } from '../../shared/catalog'
+import { identifyVisitor } from './touch-tracking'
 import './App.css'
 
 type CartLine = { productId: string; quantity: number }
-type Order = { id: string; email: string; items: CartLine[] }
+type Order = { id: string; email: string; items: CartLine[]; emailIdentified: boolean }
 type Route = { page: 'home' | 'product' | 'cart' | 'checkout' | 'confirmation'; slug?: string }
 
 function getRoute(): Route {
@@ -132,7 +133,7 @@ function App() {
   const subtotal = cartProducts.reduce((total, line) => total + line.product.price * line.quantity, 0)
   const product = products.find((item) => item.slug === route.slug)
 
-  function handlePlaceTestOrder(event: FormEvent<HTMLFormElement>) {
+  async function handlePlaceTestOrder(event: React.SubmitEvent<HTMLFormElement>) {
     event.preventDefault()
     if (submitting || cartProducts.length === 0) return
     const form = event.currentTarget
@@ -140,16 +141,21 @@ function App() {
     const email = new FormData(form).get('email')?.toString().trim()
     if (!email) return
     setSubmitting(true)
-    // TODO: Attach attribution/conversion test logic here; do not add final tracking strings yet.
-    const completedOrder = {
-      id: `NS-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
-      email,
-      items: cart,
+    try {
+      // TODO: Attach conversion-testing logic here; do not add final tracking strings yet.
+      const emailIdentified = await identifyVisitor(email)
+      const completedOrder = {
+        id: `NS-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+        email,
+        items: cart,
+        emailIdentified,
+      }
+      setOrder(completedOrder)
+      setCart([])
+      navigate('/order-confirmation')
+    } finally {
+      setSubmitting(false)
     }
-    setOrder(completedOrder)
-    setCart([])
-    setSubmitting(false)
-    navigate('/order-confirmation')
   }
 
   return (
@@ -215,7 +221,7 @@ function App() {
           </section>
         )}
         {route.page === 'confirmation' && (
-          order ? <section className="confirmation"><span className="confirmation-mark">✓</span><span className="eyebrow">TEST ORDER COMPLETE</span><h1>That’s a wrap.</h1><p>Your simulated order is confirmed. Nothing has been charged or shipped.</p><div className="confirmation-card"><span>Mock order number</span><strong>{order.id}</strong><span>Confirmation sent to (for this session only)</span><strong>{order.email}</strong><span>Items in this test order</span><strong>{order.items.reduce((total, item) => total + item.quantity, 0)}</strong></div><a className="button button-dark" href="/">Back to Northstar <span>↗</span></a></section> : <section className="empty-state"><h1>No order to show yet.</h1><a className="button button-dark" href="/">Back to the store</a></section>
+          order ? <section className="confirmation"><span className="confirmation-mark">✓</span><span className="eyebrow">TEST ORDER COMPLETE</span><h1>That’s a wrap.</h1><p>Your simulated order is confirmed. Nothing has been charged or shipped.</p><p className={`identify-result ${order.emailIdentified ? 'identify-success' : 'identify-failure'}`} role="status">{order.emailIdentified ? 'Email linked to this visitor in the Attribution System.' : 'Order confirmed, but email identification could not be confirmed.'}</p><div className="confirmation-card"><span>Mock order number</span><strong>{order.id}</strong><span>Confirmation sent to (for this session only)</span><strong>{order.email}</strong><span>Items in this test order</span><strong>{order.items.reduce((total, item) => total + item.quantity, 0)}</strong></div><a className="button button-dark" href="/">Back to Northstar <span>↗</span></a></section> : <section className="empty-state"><h1>No order to show yet.</h1><a className="button button-dark" href="/">Back to the store</a></section>
         )}
       </main>
       <footer className="store-footer"><a className="store-brand" href="/"><span className="brand-mark">N</span><span>northstar<span className="brand-light"> supply</span></span></a><span>Thoughtful things for everyday life.</span><span>© 2026 Northstar Supply · Test storefront</span></footer>
