@@ -204,7 +204,7 @@ function isTouchResponse(value: unknown): value is TouchResponse {
   )
 }
 
-async function getErrorMessage(response: Response): Promise<string> {
+async function getErrorMessage(response: Response, requestName = 'Touch request'): Promise<string> {
   try {
     const body: unknown = await response.json()
     if (
@@ -216,9 +216,37 @@ async function getErrorMessage(response: Response): Promise<string> {
       return body.message
     }
   } catch (error) {
-    console.error('Could not read the touch API error response.', error)
+    console.error(`Could not read the ${requestName.toLowerCase()} error response.`, error)
   }
-  return `Touch request failed with HTTP ${response.status}.`
+  return `${requestName} failed with HTTP ${response.status}.`
+}
+
+export async function createCheckoutSession(): Promise<void> {
+  if (!API_KEY) {
+    throw new Error('Checkout session was not created: configure VITE_ATTRIBUTION_API_KEY.')
+  }
+
+  const endpoint = `${API_BASE_URL}/v1/checkout-sessions`
+  let response: Response
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': API_KEY,
+      },
+      body: JSON.stringify({ visitorId: getVisitorId() }),
+    })
+  } catch (error) {
+    console.error(`Could not reach the checkout session endpoint at ${endpoint}.`, error)
+    throw new Error(`Could not reach the checkout session endpoint at ${endpoint}.`, { cause: error })
+  }
+
+  if (!response.ok) {
+    const message = await getErrorMessage(response, 'Checkout session request')
+    console.error(message)
+    throw new Error(message)
+  }
 }
 
 export async function identifyVisitor(email: string): Promise<boolean> {
@@ -226,8 +254,6 @@ export async function identifyVisitor(email: string): Promise<boolean> {
     console.error('Visitor identification was not sent: configure VITE_ATTRIBUTION_API_KEY.')
     return false
   }
-
-  console.log("In Identify")
 
   const payload = { visitorId: getVisitorId(), email }
   let response: Response

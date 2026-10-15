@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { formatPrice, products, type Product } from '../../shared/catalog'
-import { identifyVisitor, recordProductTouch } from './touch-tracking'
+import { createCheckoutSession, identifyVisitor, recordProductTouch } from './touch-tracking'
 import './App.css'
 
 type CartLine = { productId: string; quantity: number }
@@ -81,6 +81,11 @@ function App() {
   const [notice, setNotice] = useState('')
   const [order, setOrder] = useState<Order | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [checkoutStep, setCheckoutStep] = useState<'details' | 'payment'>('details')
+  const [checkoutEmail, setCheckoutEmail] = useState('')
+  const [checkoutEmailIdentified, setCheckoutEmailIdentified] = useState(false)
+  const [paymentSucceeded, setPaymentSucceeded] = useState(false)
+  const [checkoutError, setCheckoutError] = useState('')
 
   useEffect(() => {
     const onPopState = () => setRoute(getRoute())
@@ -148,17 +153,40 @@ function App() {
     if (!email) return
     setSubmitting(true)
     try {
-      // TODO: Attach conversion-testing logic here; do not add final tracking strings yet.
       const emailIdentified = await identifyVisitor(email)
+      setCheckoutEmail(email)
+      setCheckoutEmailIdentified(emailIdentified)
+      setPaymentSucceeded(false)
+      setCheckoutError('')
+      setCheckoutStep('payment')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handleMockPayment(event: React.SubmitEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (submitting || cartProducts.length === 0) return
+    const form = event.currentTarget
+    if (!form.reportValidity()) return
+
+    setSubmitting(true)
+    setCheckoutError('')
+    try {
+      setPaymentSucceeded(true)
+      await createCheckoutSession()
       const completedOrder = {
         id: `NS-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
-        email,
+        email: checkoutEmail,
         items: cart,
-        emailIdentified,
+        emailIdentified: checkoutEmailIdentified,
       }
       setOrder(completedOrder)
       setCart([])
       navigate('/order-confirmation')
+    } catch (error) {
+      console.error('The payment was simulated, but the checkout session could not be created.', error)
+      setCheckoutError(error instanceof Error ? error.message : 'The checkout session could not be created.')
     } finally {
       setSubmitting(false)
     }
@@ -216,14 +244,28 @@ function App() {
           <section className="section-wrap page-section">
             <span className="eyebrow">A TEST CHECKOUT</span><h1 className="page-title">Almost yours.</h1>
             {cartProducts.length === 0 ? <div className="empty-state"><p>Your bag is empty, so there’s nothing to check out just yet.</p><a className="button button-dark" href="/#shop">Browse the collection</a></div> :
-              <div className="checkout-layout"><form className="checkout-form" onSubmit={handlePlaceTestOrder}>
-                <div className="test-banner"><strong>Just a test, promise.</strong><span>No payment is collected and no order will be fulfilled.</span></div>
-                <h2>Contact</h2><label htmlFor="email">Email address</label><input id="email" name="email" type="email" autoComplete="email" placeholder="you@example.com" required />
-                <h2>Shipping address</h2><div className="form-row"><div><label htmlFor="firstName">First name</label><input id="firstName" name="firstName" autoComplete="given-name" required /></div><div><label htmlFor="lastName">Last name</label><input id="lastName" name="lastName" autoComplete="family-name" required /></div></div>
-                <label htmlFor="address">Address</label><input id="address" name="address" autoComplete="street-address" required />
-                <div className="form-row"><div><label htmlFor="city">City</label><input id="city" name="city" autoComplete="address-level2" required /></div><div><label htmlFor="postal">ZIP code</label><input id="postal" name="postal" autoComplete="postal-code" required /></div></div>
-                <button className="button button-dark full-button" type="submit" disabled={submitting}>{submitting ? 'Placing test order…' : 'Place Test Order'} <span>↗</span></button>
-              </form><aside className="summary-box checkout-summary"><h2>Order summary</h2>{cartProducts.map(({ product: item, quantity }) => <div className="checkout-item" key={item.id}><img src={item.image} alt="" /><span>{item.name} × {quantity}</span><strong>{formatPrice(item.price * quantity)}</strong></div>)}<div className="summary-row summary-total"><span>Total</span><strong>{formatPrice(subtotal)}</strong></div></aside></div>}
+              <div className="checkout-layout">
+                {checkoutStep === 'details' ? <form className="checkout-form" onSubmit={handlePlaceTestOrder}>
+                  <div className="test-banner"><strong>Just a test, promise.</strong><span>No payment is collected and no order will be fulfilled.</span></div>
+                  <h2>Contact</h2><label htmlFor="email">Email address</label><input id="email" name="email" type="email" autoComplete="email" placeholder="you@example.com" required />
+                  <h2>Shipping address</h2><div className="form-row"><div><label htmlFor="firstName">First name</label><input id="firstName" name="firstName" autoComplete="given-name" required /></div><div><label htmlFor="lastName">Last name</label><input id="lastName" name="lastName" autoComplete="family-name" required /></div></div>
+                  <label htmlFor="address">Address</label><input id="address" name="address" autoComplete="street-address" required />
+                  <div className="form-row"><div><label htmlFor="city">City</label><input id="city" name="city" autoComplete="address-level2" required /></div><div><label htmlFor="postal">ZIP code</label><input id="postal" name="postal" autoComplete="postal-code" required /></div></div>
+                  <button className="button button-dark full-button" type="submit" disabled={submitting}>{submitting ? 'Saving details…' : 'Continue to payment'} <span>↗</span></button>
+                </form> : <form className="checkout-form gateway-form" onSubmit={handleMockPayment}>
+                  <div className="gateway-heading"><span className="eyebrow">NORTHSTAR MOCK GATEWAY</span><strong>Secure test payment</strong></div>
+                  <div className="test-banner"><strong>Simulated payment only</strong><span>These test details are not saved or sent to a payment provider.</span></div>
+                  <label htmlFor="cardName">Name on card</label><input id="cardName" name="cardName" autoComplete="cc-name" placeholder="Alex Morgan" required />
+                  <label htmlFor="cardNumber">Card number</label><input id="cardNumber" name="cardNumber" inputMode="numeric" autoComplete="cc-number" placeholder="4242 4242 4242 4242" pattern="[0-9 ]{12,23}" required />
+                  <div className="form-row"><div><label htmlFor="cardExpiry">Expiry date</label><input id="cardExpiry" name="cardExpiry" autoComplete="cc-exp" placeholder="MM / YY" pattern="(0[1-9]|1[0-2])\\s*/\\s*[0-9]{2}" required /></div><div><label htmlFor="cardCvc">Security code</label><input id="cardCvc" name="cardCvc" inputMode="numeric" autoComplete="cc-csc" placeholder="CVC" pattern="[0-9]{3,4}" required /></div></div>
+                  <div className="gateway-total"><span>Amount due</span><strong>{formatPrice(subtotal)}</strong></div>
+                  {paymentSucceeded && <p className="payment-status" role="status">Mock payment succeeded. Confirming your checkout with Northstar…</p>}
+                  {checkoutError && <p className="checkout-error" role="alert">Payment was simulated, but order confirmation is waiting for the checkout service: {checkoutError}</p>}
+                  <button className="button button-dark full-button" type="submit" disabled={submitting}>{submitting ? 'Confirming checkout…' : paymentSucceeded ? 'Retry order confirmation' : `Pay ${formatPrice(subtotal)}`} <span>↗</span></button>
+                  <button className="button button-outline full-button" type="button" onClick={() => { setCheckoutStep('details'); setCheckoutError('') }} disabled={submitting || paymentSucceeded}>Back to shipping details</button>
+                </form>}
+                <aside className="summary-box checkout-summary"><h2>Order summary</h2>{cartProducts.map(({ product: item, quantity }) => <div className="checkout-item" key={item.id}><img src={item.image} alt="" /><span>{item.name} × {quantity}</span><strong>{formatPrice(item.price * quantity)}</strong></div>)}<div className="summary-row summary-total"><span>Total</span><strong>{formatPrice(subtotal)}</strong></div></aside>
+              </div>}
           </section>
         )}
         {route.page === 'confirmation' && (
