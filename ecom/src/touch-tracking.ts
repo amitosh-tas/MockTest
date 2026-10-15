@@ -1,6 +1,10 @@
-const API_KEY = 'pk_test_MFug-NcERchZ2cHupE8-EwwZpKDtWkPYaxZladwla1U'
-const ENDPOINT = 'http://localhost:3000/v1/touches'
-const SESSION_KEY = 'aid_session'
+const API_BASE_URL = (
+  import.meta.env.VITE_ATTRIBUTION_API_URL || 'http://localhost:5000'
+).replace(/\/+$/, '')
+const ENDPOINT = `${API_BASE_URL}/v1/touches`
+const API_KEY = import.meta.env.VITE_ATTRIBUTION_API_KEY
+const VISITOR_ID_KEY = 'aid_vid'
+const TOUCH_HISTORY_KEY = 'aid_touches'
 const SESSION_WINDOW_MS = 30 * 60 * 1000
 
 type TouchPayload = {
@@ -11,40 +15,138 @@ type TouchPayload = {
   campaign: string | null
   term: string | null
   content: string | null
+  referrer: string | null
+  landingPage: string
+  pageTitle: string
   gclid: string | null
   fbclid: string | null
   ttclid: string | null
   msclkid: string | null
-  referrer: string | null
-  landingPage: string
-  pageTitle: string
+  fbc: string | null
+  fbp: string | null
+  ga: string | null
 }
 
-type StoredSession = { at: number; sig: string }
+type TouchResponse = {
+  id: string
+  visitorId: string
+  channel: string
+  touchedAt: string
+  [key: string]: unknown
+}
+
+type StoredTouch = {
+  payload: TouchPayload
+  response: TouchResponse
+  recordedAt: number
+}
+
+function getCookie(name: string): string | null {
+  const prefix = `${name}=`
+  const cookie = document.cookie.split('; ').find((entry) => entry.startsWith(prefix))
+  if (!cookie) return null
+
+  try {
+    return decodeURIComponent(cookie.slice(prefix.length))
+  } catch (error) {
+    console.error(`Could not decode the ${name} cookie.`, error)
+    return null
+  }
+}
+
+function createVisitorId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+
+  const randomHex = () => Math.floor(Math.random() * 16).toString(16)
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (character) => {
+    const value = Number.parseInt(randomHex(), 16)
+    return (character === 'x' ? value : (value & 0x3) | 0x8).toString(16)
+  })
+}
 
 function getVisitorId(): string {
-  const match = document.cookie.match(/(?:^|; )aid_vid=([^;]+)/)
-  if (match) {
-    try {
-      return decodeURIComponent(match[1])
-    } catch (error) {
-      console.error('Could not decode the saved attribution visitor ID.', error)
-    }
+  try {
+    const storedId = localStorage.getItem(VISITOR_ID_KEY)
+    if (storedId) return storedId
+  } catch (error) {
+    console.error('Could not read the saved attribution visitor ID from local storage.', error)
   }
 
-  const visitorId = typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
-  document.cookie = `aid_vid=${encodeURIComponent(visitorId)}; max-age=63072000; path=/; SameSite=Lax`
+  // Migrate IDs saved by the previous cookie-based tracker before creating a new one.
+  const visitorId = getCookie(VISITOR_ID_KEY) || createVisitorId()
+
+  try {
+    localStorage.setItem(VISITOR_ID_KEY, visitorId)
+  } catch (error) {
+    console.error('Could not save the attribution visitor ID to local storage.', error)
+    const secureAttribute = window.location.protocol === 'https:' ? '; Secure' : ''
+    document.cookie =
+      `${VISITOR_ID_KEY}=${encodeURIComponent(visitorId)}; max-age=63072000; path=/; SameSite=Lax${secureAttribute}`
+  }
+
   return visitorId
 }
 
-function getParameter(params: URLSearchParams, name: string): string | null {
+function getQueryParameter(params: URLSearchParams, name: string): string | null {
   return params.get(name) ?? params.get(`utm_${name}`)
 }
 
-function shouldSendTouch(payload: TouchPayload): boolean {
-  const signature = [
+function buildPayload(): TouchPayload {
+  const params = new URLSearchParams(window.location.search)
+  return {
+    visitorId: getVisitorId(),
+    touchedAt: new Date().toISOString(),
+    source: getQueryParameter(params, 'source'),
+    medium: getQueryParameter(params, 'medium'),
+    campaign: getQueryParameter(params, 'campaign'),
+    term: getQueryParameter(params, 'term'),
+    content: getQueryParameter(params, 'content'),
+    referrer: document.referrer || null,
+    landingPage: window.location.href,
+    pageTitle: document.title,
+    gclid: params.get('gclid'),
+    fbclid: params.get('fbclid'),
+    ttclid: params.get('ttclid'),
+    msclkid: params.get('msclkid'),
+    fbc: getCookie('_fbc'),
+    fbp: getCookie('_fbp'),
+    ga: getCookie('_ga'),
+  }
+}
+
+function isStoredTouch(value: unknown): value is StoredTouch {
+  if (typeof value !== 'object' || value === null || !('payload' in value) || !('response' in value)) {
+    return false
+  }
+  const record = value as { payload?: unknown; response?: unknown; recordedAt?: unknown }
+  return (
+    typeof record.recordedAt === 'number' &&
+    typeof record.payload === 'object' &&
+    record.payload !== null &&
+    typeof record.response === 'object' &&
+    record.response !== null
+  )
+}
+
+function readTouchHistory(): StoredTouch[] {
+  try {
+    const raw = localStorage.getItem(TOUCH_HISTORY_KEY)
+    if (!raw) return []
+
+    const value: unknown = JSON.parse(raw)
+    if (!Array.isArray(value)) {
+      console.error('Saved attribution touch history is not a list.')
+      return []
+    }
+    return value.filter(isStoredTouch)
+  } catch (error) {
+    console.error('Could not read attribution touch history from local storage.', error)
+    return []
+  }
+}
+
+function getTouchSignature(payload: TouchPayload): string {
+  return [
     payload.visitorId,
     payload.source,
     payload.medium,
@@ -54,82 +156,130 @@ function shouldSendTouch(payload: TouchPayload): boolean {
     payload.ttclid,
     payload.msclkid,
   ].join('|')
-
-  let last: StoredSession | null = null
-  try {
-    const saved = sessionStorage.getItem(SESSION_KEY)
-    if (saved) {
-      const parsed: unknown = JSON.parse(saved)
-      if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        'at' in parsed &&
-        typeof parsed.at === 'number' &&
-        'sig' in parsed &&
-        typeof parsed.sig === 'string'
-      ) {
-        last = { at: parsed.at, sig: parsed.sig }
-      }
-    }
-  } catch (error) {
-    console.error('Could not read attribution session state.', error)
-  }
-
-  const isNewSession = !last || Date.now() - last.at > SESSION_WINDOW_MS
-  const campaignChanged = last !== null && last.sig !== signature && signature !== '|||||||'
-  if (!isNewSession && !campaignChanged) return false
-
-  try {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ at: Date.now(), sig: signature }))
-  } catch (error) {
-    console.error('Could not save attribution session state.', error)
-  }
-  return true
 }
 
-function captureLandingTouch(): void {
-  const params = new URLSearchParams(window.location.search)
-  const payload: TouchPayload = {
-    visitorId: getVisitorId(),
-    touchedAt: new Date().toISOString(),
-    source: getParameter(params, 'source'),
-    medium: getParameter(params, 'medium'),
-    campaign: getParameter(params, 'campaign'),
-    term: getParameter(params, 'term'),
-    content: getParameter(params, 'content'),
-    gclid: params.get('gclid'),
-    fbclid: params.get('fbclid'),
-    ttclid: params.get('ttclid'),
-    msclkid: params.get('msclkid'),
-    referrer: document.referrer || null,
-    landingPage: window.location.href,
-    pageTitle: document.title,
-  }
+function hasMarketingSignal(payload: TouchPayload): boolean {
+  return [
+    payload.source,
+    payload.medium,
+    payload.campaign,
+    payload.gclid,
+    payload.fbclid,
+    payload.ttclid,
+    payload.msclkid,
+  ].some(Boolean)
+}
 
-  console.log('Attribution touch payload:', payload)
-  if (!shouldSendTouch(payload)) {
-    console.log('Should not send touch for now')
+function shouldSendTouch(payload: TouchPayload, history: StoredTouch[]): boolean {
+  const previous = history.at(-1)
+  if (!previous || Date.now() - previous.recordedAt > SESSION_WINDOW_MS) return true
+
+  return (
+    previous.payload.source !== payload.source ||
+    previous.payload.campaign !== payload.campaign ||
+    (getTouchSignature(previous.payload) !== getTouchSignature(payload) &&
+      hasMarketingSignal(payload))
+  )
+}
+
+function isTouchResponse(value: unknown): value is TouchResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'id' in value &&
+    typeof value.id === 'string' &&
+    'visitorId' in value &&
+    typeof value.visitorId === 'string' &&
+    'channel' in value &&
+    typeof value.channel === 'string' &&
+    'touchedAt' in value &&
+    typeof value.touchedAt === 'string'
+  )
+}
+
+async function getErrorMessage(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json()
+    if (
+      typeof body === 'object' &&
+      body !== null &&
+      'message' in body &&
+      typeof body.message === 'string'
+    ) {
+      return body.message
+    }
+  } catch (error) {
+    console.error('Could not read the touch API error response.', error)
+  }
+  return `Touch request failed with HTTP ${response.status}.`
+}
+
+function saveSuccessfulTouch(touch: StoredTouch): void {
+  const history = readTouchHistory()
+  history.push(touch)
+
+  try {
+    localStorage.setItem(TOUCH_HISTORY_KEY, JSON.stringify(history))
+  } catch (error) {
+    console.error('Touch was accepted, but its API response could not be saved to local storage.', error)
+  }
+}
+
+async function captureLandingTouch(): Promise<void> {
+  if (!API_KEY) {
+    console.error(
+      'Touch tracking is not configured: set VITE_ATTRIBUTION_API_KEY in ecom/.env and restart the Vite dev server.',
+    )
     return
   }
 
-  void fetch(ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify(payload),
-    keepalive: true,
-  })
-    .then(async (response) => {
-      if (!response.ok) {
-        throw new Error(`Touch request failed with HTTP ${response.status}`)
-      }
-      console.log('Attribution touch response:', await response.json())
+  const payload = buildPayload()
+  const history = readTouchHistory()
+  console.info('Attribution touch payload:', payload)
+  if (!shouldSendTouch(payload, history)) {
+    console.info('Touch not sent: this visitor and campaign were already recorded in the current session.')
+    return
+  }
+
+  let response: Response
+  try {
+    response = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': API_KEY,
+      },
+      body: JSON.stringify(payload),
+      keepalive: true,
     })
-    .catch((error: unknown) => {
-      console.error('Could not send attribution touch.', error)
-    })
+  } catch (error) {
+    console.error(
+      `Could not reach ${ENDPOINT}. Check that the API is running and allows the storefront origin and X-Api-Key header through CORS.`,
+      error,
+    )
+    return
+  }
+
+  if (response.status !== 201) {
+    console.error(await getErrorMessage(response))
+    return
+  }
+
+  let result: unknown
+  try {
+    result = await response.json()
+  } catch (error) {
+    console.error('The touch endpoint returned an unreadable JSON response.', error)
+    return
+  }
+
+  if (!isTouchResponse(result)) {
+    console.error('The touch endpoint returned an unexpected response format.', result)
+    return
+  }
+
+  saveSuccessfulTouch({ payload, response: result, recordedAt: Date.now() })
+  console.info('Attribution touch recorded:', result)
 }
 
-captureLandingTouch()
+void captureLandingTouch()
