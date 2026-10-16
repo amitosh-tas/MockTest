@@ -41,6 +41,16 @@ type StoredTouch = {
   recordedAt: number
 }
 
+export type CheckoutSession = {
+  checkoutSessionId: string
+  token: string
+  visitorId: string
+  visitorRecordId: string
+  touchIds: string[]
+  touchCount: number
+  expiresAt: string
+}
+
 function getCookie(name: string): string | null {
   const prefix = `${name}=`
   const cookie = document.cookie.split('; ').find((entry) => entry.startsWith(prefix))
@@ -221,7 +231,7 @@ async function getErrorMessage(response: Response, requestName = 'Touch request'
   return `${requestName} failed with HTTP ${response.status}.`
 }
 
-export async function createCheckoutSession(): Promise<void> {
+export async function createCheckoutSession(): Promise<CheckoutSession> {
   if (!API_KEY) {
     throw new Error('Checkout session was not created: configure VITE_ATTRIBUTION_API_KEY.')
   }
@@ -246,6 +256,50 @@ export async function createCheckoutSession(): Promise<void> {
     const message = await getErrorMessage(response, 'Checkout session request')
     console.error(message)
     throw new Error(message)
+  }
+
+  let result: unknown
+  try {
+    result = await response.json()
+  } catch (error) {
+    console.error('The checkout session endpoint returned an unreadable JSON response.', error)
+    throw new Error('The checkout session endpoint returned an unreadable response.', { cause: error })
+  }
+
+  if (
+    typeof result !== 'object' ||
+    result === null ||
+    !('checkoutSessionId' in result) ||
+    typeof result.checkoutSessionId !== 'string' ||
+    !('token' in result) ||
+    typeof result.token !== 'string' ||
+    result.token.length === 0 ||
+    !('visitorId' in result) ||
+    result.visitorId !== getVisitorId() ||
+    !('visitorRecordId' in result) ||
+    typeof result.visitorRecordId !== 'string' ||
+    !('touchIds' in result) ||
+    !Array.isArray(result.touchIds) ||
+    !result.touchIds.every((touchId) => typeof touchId === 'string') ||
+    !('touchCount' in result) ||
+    typeof result.touchCount !== 'number' ||
+    !Number.isInteger(result.touchCount) ||
+    result.touchCount < 0 ||
+    !('expiresAt' in result) ||
+    typeof result.expiresAt !== 'string'
+  ) {
+    console.error('The checkout session endpoint returned an unexpected response format.', result)
+    throw new Error('The checkout session endpoint returned an unexpected response format.')
+  }
+
+  return {
+    checkoutSessionId: result.checkoutSessionId,
+    token: result.token,
+    visitorId: result.visitorId,
+    visitorRecordId: result.visitorRecordId,
+    touchIds: result.touchIds,
+    touchCount: result.touchCount,
+    expiresAt: result.expiresAt,
   }
 }
 

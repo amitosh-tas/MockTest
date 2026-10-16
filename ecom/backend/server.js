@@ -62,6 +62,11 @@ function calculateAmount(items) {
 app.post('/api/create-order', async (req, res) => {
   let amount
   try {
+    const { sessionToken } = req.body || {}
+    if (typeof sessionToken !== 'string' || sessionToken.trim().length === 0 || sessionToken.length > 256) {
+      return res.status(400).json({ message: 'A valid checkout session token is required.' })
+    }
+
     amount = calculateAmount(req.body?.items)
     const { keyId } = getRazorpayCredentials()
     const razorpay = getRazorpay()
@@ -69,15 +74,15 @@ app.post('/api/create-order', async (req, res) => {
       amount,
       currency,
       receipt: `ns_${randomUUID().replaceAll('-', '').slice(0, 32)}`,
+      notes: { sessionToken },
     })
+
+    console.log("ODERDERRRRRRRRRR:\n\n\n\n\n\n", order)
 
     res.status(201).json({
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      notes: {
-        sessionToken: "session tokken - add ",
-      },
       keyId,
     })
   } catch (error) {

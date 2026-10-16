@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { formatPrice, products, type Product } from '../../shared/catalog'
-import { createCheckoutSession, identifyVisitor, recordProductTouch } from './touch-tracking'
+import {
+  createCheckoutSession,
+  identifyVisitor,
+  recordProductTouch,
+  type CheckoutSession,
+} from './touch-tracking'
 import {
   createRazorpayOrder,
   loadRazorpayCheckout,
@@ -91,6 +96,7 @@ function App() {
   const [checkoutStep, setCheckoutStep] = useState<'details' | 'payment'>('details')
   const [checkoutEmail, setCheckoutEmail] = useState('')
   const [checkoutEmailIdentified, setCheckoutEmailIdentified] = useState(false)
+  const [checkoutSession, setCheckoutSession] = useState<CheckoutSession | null>(null)
   const [paymentVerified, setPaymentVerified] = useState(false)
   const [gatewayOpen, setGatewayOpen] = useState(false)
   const [pendingPayment, setPendingPayment] = useState<RazorpayPaymentResponse | null>(null)
@@ -167,6 +173,7 @@ function App() {
       const emailIdentified = await identifyVisitor(email)
       setCheckoutEmail(email)
       setCheckoutEmailIdentified(emailIdentified)
+      setCheckoutSession(null)
       setPaymentVerified(false)
       setGatewayOpen(false)
       setPendingPayment(null)
@@ -187,7 +194,6 @@ function App() {
         await verifyRazorpayPayment(response)
         setPaymentVerified(true)
       }
-      await createCheckoutSession()
       const completedOrder = {
         id: response.razorpay_order_id,
         email: checkoutEmail,
@@ -213,9 +219,15 @@ function App() {
     setSubmitting(true)
     setCheckoutError('')
     try {
+      let session = checkoutSession
+      if (!session) {
+        session = await createCheckoutSession()
+        setCheckoutSession(session)
+      }
+
       const items = cart.map(({ productId, quantity }) => ({ productId, quantity }))
       const [order] = await Promise.all([
-        createRazorpayOrder(items, subtotal * 100),
+        createRazorpayOrder(items, subtotal * 100, session.token),
         loadRazorpayCheckout(),
       ])
       let paymentCompleted = false
@@ -313,6 +325,7 @@ function App() {
                 </form> : <div className="checkout-form gateway-form">
                   <div className="gateway-heading"><span className="eyebrow">RAZORPAY CHECKOUT</span><strong>Secure payment</strong></div>
                   <div className="test-banner"><strong>Payment details stay with Razorpay</strong><span>You’ll complete payment in Razorpay’s secure checkout window.</span></div>
+                  {checkoutSession && <p className="payment-status" role="status">Checkout session ready. Continue to open secure payment.</p>}
                   <div className="gateway-total"><span>Amount due</span><strong>{formatPrice(subtotal)}</strong></div>
                   {gatewayOpen && <p className="payment-status" role="status">Razorpay Checkout is open. Complete payment or close its window to continue.</p>}
                   {paymentVerified && <p className="payment-status" role="status">Payment verified. Confirming your checkout with Northstar…</p>}

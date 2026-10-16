@@ -85,8 +85,12 @@ async function post<T>(path: string, payload: unknown): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export async function createRazorpayOrder(items: CartItem[], expectedAmount: number): Promise<RazorpayOrder> {
-  const order = await post<RazorpayOrder>('/api/create-order', { items })
+export async function createRazorpayOrder(
+  items: CartItem[],
+  expectedAmount: number,
+  sessionToken: string,
+): Promise<RazorpayOrder> {
+  const order = await post<RazorpayOrder>('/api/create-order', { items, sessionToken })
   if (
     typeof order.orderId !== 'string' ||
     !Number.isSafeInteger(order.amount) ||
